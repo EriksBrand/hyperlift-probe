@@ -120,8 +120,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.route_redirect()
             if path == "/refuse":
                 return self.route_refuse()
-        except BrokenPipeError:
-            log(f"client disconnected during {path}")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            # The client (or the proxy) went away mid-response. Nothing can be
+            # sent on a dead socket, so log one line and stop — do NOT try to
+            # send a 500, which is what produced the noisy double-traceback.
+            log(f"peer gone during {path}: {type(exc).__name__}")
             return
         except Exception as exc:  # noqa: BLE001
             log(f"ERROR {path}: {type(exc).__name__}: {exc}")
@@ -134,6 +137,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def route_index(self):
         self._send_json({
             "app": "hyperlift-probe",
+            "version": "1.1",
             "boot_id": BOOT_ID,
             "now": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "endpoints": {
@@ -364,8 +368,25 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    # The Hyperlift proxy RSTs idle keep-alive connections after ~15s rather
+    # than closing them gracefully. Stock socketserver prints a full traceback
+    # for each one, which buries real errors. Collapse those to a single line.
+    QUIET_ERRORS = (
+        ConnectionResetError,
+        BrokenPipeError,
+        ConnectionAbortedError,
+        TimeoutError,
+    )
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, self.QUIET_ERRORS):
+            log(f"conn closed by peer {client_address[0]} ({type(exc).__name__})")
+            return
+        super().handle_error(request, client_address)
+
 
 if __name__ == "__main__":
-    log(f"probe starting boot_id={BOOT_ID} port={PORT} python={sys.version_info[:3]}")
+    log(f"probe v1.1 starting boot_id={BOOT_ID} port={PORT} python={sys.version_info[:3]}")
     log(f"preferred encoding={locale.getpreferredencoding(False)} LANG={os.environ.get('LANG')}")
     ThreadedServer(("0.0.0.0", PORT), Handler).serve_forever()
