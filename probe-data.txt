@@ -1,0 +1,2 @@
+Locale probe line — with an em dash and a middot · in it.
+_doc: "vault-config style line — fields separated by · markers"
